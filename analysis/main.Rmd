@@ -1,0 +1,458 @@
+---
+title: "Blackwell: Predicting Profitabilty"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::html_clean:
+    highlight: kate
+---
+```{r knitr_init, echo=FALSE, cache=FALSE}
+library(knitr)
+library(rmdformats)
+
+## Global options
+options(max.print="75")
+opts_chunk$set(echo=FALSE,
+	             cache=TRUE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE)
+opts_knit$set(width=75)
+```
+
+```{r Import and read, echo=FALSE}
+# Import libraries
+pacman::p_load(pacman, tidyverse, caret, party, reshape2, PerformanceAnalytics, VIM, gridExtra)
+
+# Set seed
+set.seed(99)
+
+# Import datasets, 2 datasets for exisitng products and new products
+df_existing_products <- read.csv("../data/existingproductattributes2017.csv")
+df_new_products <- read.csv("../data/newproductattributes2017.csv")
+```
+
+# Executive summary
+
+The goal of this analysis is to **predict the sales volume** of each of the potential **new products** from which profitability can be estimated. To do so, we used **three different models, K nearest neighbor, support vector machine, and random foret**  that were trained on a data set of previous sales for a product and product related variables such number of 1-5 star reviews, product category, etc... These models predict volumes for new products based on what they can learn from existing products who display similar features.
+
+In order to choose a model to make our predictions, we base ourselves on the different errors metrics. We want a model that is able to make the most accurate predictions and hence has the best (lowest) errors metrics. The **7 nearest neighbors model** showed the most promising results: this model **explains 92% of the variance in volume**, the dependant variable. However, an important side note is that this model was able to **predict volumes below 2.000 very accurately**. Its predictive power **breaks down for predicting volumes greater than 2.000**. These can be considered outliers in our data. It is important to be aware of the potential impact they have on our final prediction. Eventhough these high volume points can be seen as outliers, these points are potentially the most interesting from a bussines point of view. Therefore deeper analysis of these products is advised.
+
+# Recommendations
+
+* We strongly recommend that we **integrate product 176 and 175 (laptops) in Blackwell’s product line**
+  + Both products drive by far the **most profit** on the list of new products
+  + In addition, they also drive the **largest sales volumes**. Each sales can potentially lead to **cross sales on the *website** if we make proper use of a recommendation engine.
+* Focus on **portable computing solutions**
+  + **6 out of 10 of the most profitable products** are  **portable computing solutions** such as tablets, notebooks, and laptops. 
+  + **Also in terms of volume** we see that tablets, notebooks and laptops are the main traffic drivers. PC’s only remain in the top 5 most profitable products because of their high price point and margin
+
+# Next Steps
+
+* **Gather more data** for the product category game console in order to make an accurate prediction for this category
+* Try to increase the overall performance of the model by **combining different types of models**. For example we see that the 7 nn performs well when it comes to lower volume products (volume < 2.000) whilst the SVM performs better comparatively in the higher volume range (volume > 2.000). Combining these models will most likely lead to better overall performance.
+
+
+# Analysis
+
+## Data Cleaning
+
+### The Data Set
+
+The table below displays the first five rows of the data set.
+```{r Data set, fig.align='center', echo=FALSE}
+knitr::kable(head(df_existing_products), align = "c")
+```
+
+### Summary Of The Data Set
+
+```{r Data set summary, fig.align='center', echo=FALSE}
+summary_existing_products <- summary(df_existing_products)
+knitr::kable(summary_existing_products, align = "c")
+```
+
+### Cleaning The Data Set
+
+We check for duplicated instances. Some of the following instances are most likely duplicated and will therefore be removed. One of the instances will be kept in the data set (random selection)
+
+```{r Data cleaning, echo=FALSE}
+# Take out duplicate instance of data frame except for one, write to new data frame to plot. 
+duplicate_instances <- 
+  df_existing_products[df_existing_products$ProductType == "ExtendedWarranty",]
+df_existing_products <- 
+  df_existing_products[-which(df_existing_products$ProductNum < 142 & df_existing_products$ProductNum > 134), ]
+
+# Display duplicates in table
+knitr::kable(duplicate_instances, align = "c")
+```
+
+We remove columns that don't add any value. In our case the variable ProductNum doesn't add value as it a sku number and therefore meaningless for our purposes.
+
+```{r Remove meaningless columns, fig.align='center'}
+# Add the columns you would like to delete from the dataframe to the drop_col vector
+drop_col <- c("ProductNum")
+df_existing_products <- df_existing_products[,-which(names(df_existing_products) %in% drop_col)]
+```
+
+```{r Check and locate NA, fig.align='center'}
+# Check, count and locate NA values
+total_na <- sum(is.na(df_existing_products))
+na_columns <- colnames(df_existing_products)[colSums(is.na(df_existing_products)) > 0]
+```
+
+Check if there are any NA values in our data set. In our case there are a total of **15** NA values and they all fall within the feature BestSellerRank
+
+Visualize the location of the NA values. 
+
+```{r Visualize NA, fig.align='center'}
+plot(VIM::aggr(df_existing_products))
+```
+
+Later analysis showed that the BestSellerRank does a poor job in predecting sales volume. Therefore we exclude this feature from our data set, subsequently also removing als NA values.
+
+```{r Remove feature BestSellerRank, fig.align='center', echo=F}
+# Data frame without BestsellerSellers rank feature
+df_no_bestseller <- df_existing_products[,-which(colnames(df_existing_products) == "BestSellersRank")]
+df_clean <- df_no_bestseller
+```
+
+* Ideas to add
+  + Predict the NA's
+  + ..
+  
+
+## Data Exploration and Feature Engineering
+
+### The Dependant Variable
+
+Plot the dependant variable to get a better understanding of the distribtion, outliers and potentially interesting points/trends.
+```{r Boxplot dependant, echo=TRUE, fig.align='center', echo=FALSE}
+ggplot(df_clean, aes(y = df_clean$Volume)) + 
+  geom_boxplot() +
+  ggtitle("Boxplot: Sales Volume") +
+  xlab("Product Type") +
+  ylab("Sales Volume")
+```
+
+We can see that are there are two clear outliers in terms of volume. Besides these two outliers we observe additional outliers in the data. 
+In base R boxplot outliers are defined as data points who are more than 1.5 times the interquartile range for the upper/lower outliers (depending on the of location of the outlier). In our case we have many outliers for the upper higher values because there is a positive skew in the dependant data.
+
+This is confirmed in the density and histogram plot.
+
+```{r, echo=FALSE, fig.align='center'}
+p1 <- ggplot(df_clean, aes(x = Volume)) + 
+  geom_histogram()
+
+p2 <- ggplot(df_clean, aes(x = Volume)) + 
+  geom_density()
+
+library(gridExtra)
+
+grid.arrange(p1, p2, ncol=2)
+
+```
+
+The skewed distribution makes the boxplot think that some points are outliers while the actually fall within
+the expected range of the distribution. That's why decide to only take the data points with volume greater that 2500 and keep all other points in the data.
+
+```{r Remove outliers, echo=FALSE, fig.align='center'}
+outliers <- df_clean[which(df_clean$Volume > 2500), ]
+df_clean <- df_clean[-which(df_clean$Volume > 2500), ]
+```
+
+### The Independant Variables
+
+The goal of this section is to better understand the indepandant variabes and their relationships to the independant variable. We start out with analysis of the product type category and volume, the dependant variable.
+
+```{r Boxplot Volume vs Product Type, echo=FALSE, fig.align='center'}
+ggplot(df_clean, aes(x = reorder(df_clean$ProductType, -df_clean$Volume), y = df_clean$Volume)) + 
+  geom_boxplot() +
+  ggtitle("Boxplot: Sales Volume vs. Product Type") +
+  theme(axis.text.x=element_text(angle=45, hjust=1)) +
+  xlab("Product Type") +
+  ylab("Sales Volume")
+```
+
+We see that there is potentially a difference in volume across the different categories, to be more percise we see that the game console category has a greater volume compared to other categories. We will use ANOVA and Tukey test, to analyse whether this difference is significant (and therefore meaningful) or not.
+
+```{r ANOVA, echo=FALSE, fig.align='center'}
+anova_1 <- aov(formula = df_clean$Volume ~ df_clean$ProductType)
+anova_1_results <- summary(anova_1)
+
+summary(anova_1)
+```
+
+The p value is greater than 5%, therefore we do not reject the the nulhypothesis (H0 = There is no signicant difference between the volumes of the product types). This implies that we cannot say with 95% certainty that the different producttypes impact the the salesvolume.
+
+This is confirmed by the Tukey test, which test for factor on factor difference. We see that the confidence interval for the difference contains zero for all possible pairs of the variables, implying that there is no significant difference between the factors. The horizontal lines in the graph below represent the confidence intervals for each pair. The vertical line indicates zero
+
+```{r Tukey, echo=FALSE,  fig.align='center'}
+level_on_level <- TukeyHSD(anova_1)
+plot(level_on_level)
+
+# This means we can drop the variable datatype for our purposes.
+df_clean <- df_clean[,-which(names(df_clean) == "ProductType")]
+```
+
+This goes against our intitial insight we gained from the boxplot. However, when we plot the the count of datapoints that belong to each category we see that category game consoles only contains 2 datapoints. This explains why the confidence interval that contains game consoles are so wide and hence why the contain zero in all of the cases.
+
+Next we take a closer look at the remaining independant variables. All of them are numerical, so we can use a correlation matrix and scatter plot to figure out if there are any relationship between the dependant and independant variables.
+
+
+```{r Correlation matrix, echo=FALSE, fig.align='center'}
+# Select only the numeric variables (source: http://www.sthda.com/english/wiki/correlation-matrix-a-quick-start-guide-to-analyze-format-and-visualize-a-correlation-matrix-using-r-software)
+
+chart.Correlation(R = df_clean, histogram = TRUE, pch = 19)
+```
+
+
+
+The table above is an overview of the different features and their respective correlation. The volume row shows the correlation between the feature and the label volume. Generally speaking we want to include variables that correlate well with the label, as these will provide accurate predictions for the label. In addition, we want to exclude variables that are highly correlated with each other, as they will end up explaining the same variation in the dependent variable. After selecting features according to this logic the following features remain:
+
+```{r Correlation matrix two, echo=FALSE, fig.align='center'}
+# Select the variables that have a strong correlation with the label and save them to x
+x <- c("x4StarReviews","PositiveServiceReview","Volume")
+
+#to create our model we select the following variables. Number of 4 star reviews and positive review
+df_all <-  df_clean
+df_clean <- df_clean[,which(names(df_clean) %in% x)]
+
+chart.Correlation(R = df_clean, histogram = TRUE, pch = 19)
+```
+
+### Feature engineering
+
+```{r NPS, review rate, average stars, echo=FALSE, fig.align='center'}
+# Calculate the total number of star reviews
+total_reviews <- df_all$x4StarReviews + 
+                 df_all$x3StarReviews + 
+                 df_all$x2StarReviews + 
+                 df_all$x1StarReviews
+
+# Calculate the net promotor score
+nps = df_all$x5StarReviews - (df_all$x3StarReviews + df_all$x2StarReviews + df_all$x1StarReviews)
+
+# Calculate review rate by dividing the number of reviews by the number of sales
+total_reviews <- df_all$x4StarReviews + 
+                 df_all$x3StarReviews + 
+                 df_all$x2StarReviews + 
+                 df_all$x1StarReviews
+
+review_rate <-  total_reviews / df_all$Volume
+
+# Calculate avg. number of stars by dividing the number of stars by the number of reviews
+total_stars = df_all$x4StarReviews*4 + 
+                 df_all$x3StarReviews*3 + 
+                 df_all$x2StarReviews*2 + 
+                 df_all$x1StarReviews*1
+
+avg_stars = total_stars / total_reviews
+
+# Column bind them to the original data frame
+df_clean <- cbind(df_clean, nps, total_stars, avg_stars)
+
+# Reoder columns so that volume is the last column in the data frame
+pos_volume <- as.vector(which(colnames(df_clean) == "Volume"))
+pos_other <- as.vector(which(colnames(df_clean) != "Volume"))
+pos_new <- c(pos_other ,pos_volume)
+df_clean <- df_clean[, pos_new]
+```
+
+Let's check the correlation matrix for our newly created variables. We are using the same rules as before for selecting which variables would be valuable predictors.
+
+```{r Correlation matrix 3, echo=FALSE, fig.align='center'}
+chart.Correlation(R = df_clean, histogram = TRUE, pch = 10)
+```
+We observe a strong correlation between total_stars and x4StarReviews. However we also observe colinearity between these two variables. The correlation is the strongest between total_stars and Volume. Therefore, we will keep this variable and discard the x4StarReviews variable. This yields the following correlation matrix.
+
+
+```{r Correlation matrix 2, echo=FALSE, fig.align='center'}
+# Select the variables that have a strong correlation with the label and save them to x
+x <- c("total_stars","PositiveServiceReview","Volume")
+
+# to create our model we select the following variables total stars, PositiveServiceReview
+df_all <-  df_clean
+df_clean <- df_clean[,which(names(df_clean) %in% x)]
+
+chart.Correlation(R = df_clean, histogram = TRUE, pch = 19)
+```
+
+### Normalization
+
+As we will be testing distance based models, we need to normalize the data. We opted for z-score standardization because this way information about the outliers is retained better. This is useful for our specific case because from a business perspective we are looking to predict high volumes. Therefore retaining as much information as possible about these points is beneficial.
+
+```{r normalize data, echo=FALSE, fig.align='center'}
+# Z-score Standardize data
+df_norm <- scale(df_clean[, -which(names(df_clean) == "Volume")])
+df_norm <- as.data.frame(df_norm)
+df_norm <- cbind(df_norm, df_clean$Volume)
+
+# Check for duplicates
+duplicated <- df_norm[which(duplicated(df_norm)),]
+
+# Remove duplicates and rename df and columns
+df <- df_norm[-which(duplicated(df_norm)),]
+colnames(df)[3] <- "Volume"
+```
+
+* Ideas to add
+  + Transform the dependant (Log transform, power transformation, ...)
+  + Use clipping method to deal with outliers instead of removing them
+  + Use k means clustering combined with PCA to enigneer more meaningful feature set
+  + Use random forrest and Varimp to predict which variables are most important
+
+## Modelling
+
+We split the data in training and testing datasets. We use the createDatapartition function because this way the split will respect distribution of  the dependant variable (stratified sampeling)
+
+```{r Split data in testing and training, echo=TRUE, fig.align='center'}
+# Split in train and test data sets
+indexes <- createDataPartition(df$Volume,
+                               times = 1,
+                               p = 0.70,
+                               list = F)
+training <- df[indexes, ]
+testing <- df[-indexes, ]
+
+```
+
+We train three different models (K nearest neighbors, random forrest, Support vector machine with a radial)
+
+```{r train models, echo=TRUE, warning=FALSE, fig.align='center'}
+
+# Split in train and test data sets
+models <- c("knn", "rf", "svmRadial", "svmLinear")
+
+# Create vectors that will hold results
+aggr <- c()
+all_pred <- c()
+
+# Use loop to train different models on training data
+for (i in models) {
+  model <- train(Volume~., 
+                 data = training, 
+                 method = i, 
+                 tuneLength = 10, 
+                 number = 5, 
+                 repeats = 3)
+  prediction <- predict(model, testing)
+  all_pred <- cbind(all_pred, prediction)
+  performance <- postResample(obs = testing$Volume, pred = prediction)
+  aggr <- cbind(aggr, performance)
+}
+
+# Give aggr and all_pred correct column names
+colnames(aggr) <- models
+colnames(all_pred) <- models
+
+# Convert all_pred to data frame and a volume as a column
+df_all_pred  <- as.data.frame(all_pred)
+df_all_pred  <- cbind(df_all_pred, testing$Volume)
+names(df_all_pred)[ncol(df_all_pred)] <- "volume"
+
+``` 
+
+
+
+```{r error analysis, include=FALSE, fig.align='center'}
+# Calculate the error per model
+errors <- c()
+
+for (i in 1:ncol(all_pred)) {
+  errors_i <- df_all_pred[, ncol(df_all_pred)] - df_all_pred[, i] 
+  errors <- cbind(errors, errors_i)
+}
+
+# Rename the columns 
+colnames(errors) <- models
+errors <- as.data.frame(cbind(errors, testing$Volume))
+
+# Plot the errors, to do so we melt the data
+colnames(errors)[ncol(errors)] <- "volume"
+df_melted <- melt(errors, id.vars = "volume")
+colnames(df_melted)[3] <- "error"
+
+
+```
+
+We see that knn has the best error metrics
+
+```{r, fig.align='center'}
+knitr::kable(aggr)
+```
+
+When we take a look the errors for each model we see that all three models perform well in prediction low volume items. However, the models seem to consistently under predict high volumes. This can be due the fact that high volume products are rare and therefore there aren't many datapoints with this property. Besides this we see that there is product all models overestimate. In addition, the SVM does a better job predicting these high volume products. Another next steps should be to make a combination of model 3 NN and SVM model to take advantages of both models strengths. 
+
+
+```{r echo=FALSE}
+ggplot(df_melted, aes(y = error, x = volume, color = variable)) + 
+  geom_point() + 
+  geom_hline(yintercept = 0, color = "red") + 
+  geom_smooth(se = F, method = "lm")
+
+ggplot(df_melted, aes(x = error)) +
+  geom_histogram() +
+  facet_grid(~variable)
+```
+
+* Ideas to add
+
+  + Check the high error points
+  + Built ensemble model and test performance on same testing
+
+## Predicting
+
+As KNN had the best error metrics, we will use this model to predict volume of products. Before we apply our model we need to perform the same preprocessing as we did on the training data. In this case, this means creating a feature "total_stars" and dropping the features not used during the training
+
+```{r echo=FALSE}
+# Remove the warranty products
+df_new_products <- df_new_products[-(df_new_products$ProductType == "ExtendedWarranty"),]
+
+# Calculate total number of stars per product
+total_stars <-  df_new_products$x4StarReviews*4 + 
+                 df_new_products$x3StarReviews*3 + 
+                 df_new_products$x2StarReviews*2 + 
+                 df_new_products$x1StarReviews*1
+total_stars <- as.data.frame((total_stars))
+
+# Drop all columnes exept for 4 star reviews and
+x <- c("x4StarReviews","PositiveServiceReview")
+df_new_products_clean <- df_new_products[,which(names(df_new_products) %in% x)]
+
+# Column bind them to the original data frame
+df_new_products_clean <- cbind(df_new_products_clean, total_stars)
+names(df_new_products_clean)[3] <- "total_stars"
+```
+
+
+
+```{r}
+# Create model on all data and use this model to predict the volume for the new products
+model <- train(Volume~., 
+               data = df, 
+               method = "knn",
+               tuneLength = 10, 
+               number = 5, 
+               repeats = 3)
+prediction <- predict(model, df_new_products_clean)
+df_new_products$predicted_volume <- prediction
+
+# Calculate the profit per product
+df_new_products$profit <- df_new_products$predicted_volume * df_new_products$ProfitMargin * df_new_products$Price
+```
+
+```{r}
+model
+```
+
+If we use the predicted volume in combination with the price and profit margin this gives us the following table.
+
+```{r}
+knitr::kable(head(df_new_products[order(-df_new_products$profit), c("ProductNum", "ProductType", "Price", "ProfitMargin", "predicted_volume", "profit")], 10))
+```
+
+As mentioned earlier in this analysis. The predictions for game consoles is most likely not accurate and is most likely being underestimated by the 7 nn model. Therefore we exclude it from our top 5 list. To avoid this problem, it is recommended to gather additional data points for this category, so we can make more accurate predictions for this category. It is apparent that the laptop category is has a lot of potential as it there is the greatest amount of potential profit present. We also see that printer model 304 shows great potential profitablity. This is mainly driven by great volumes and high price or high margin combination.
+
+It should also be noted that these are estimates and the profit numbers are most powerful to compare which product will most likely give the most profit. Incorporating all products will most likely not lead to an increase in revenue equal to the sum of all profit predictions. This can be due to factors such cannabilization of similar products.
+
